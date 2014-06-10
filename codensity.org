@@ -1,0 +1,242 @@
+* resources
+
+original paper: http://www.iai.uni-bonn.de/~jv/mpc08.pdf
+first in ed kmett's blog series: http://comonad.com/reader/2011/free-monads-for-less/
+pipes tutorial, see time complexity appendix: http://hackage.haskell.org/package/pipes-4.1.1/docs/Pipes-Tutorial.html
+runar's paper re: avoiding stack overflows via free: http://blog.higher-order.com/assets/trampolines.pdf
+
+second in blog series: http://comonad.com/reader/2011/free-monads-for-less-2/
+#+BEGIN_QUOTE
+Intuitively, you can view Yoneda as a type level construction that ensures that you get fmap fusion, while Codensity is a type level construction that ensures that you right associate binds. It is important to note that Codensity also effectively accumulates fmaps, as it uses the same definition for fmap as Yoneda!
+#+END_QUOTE
+
+* timings
+  All timings in µs.
+  |    n | zigzag(fullTree2[Tree](n)) | zigzag(fullTree2[CodensityTree](n).improve) |
+  |------+----------------------------+---------------------------------------------|
+  |    4 |                        157 |                                         192 |
+  |    8 |                        129 |                                         139 |
+  |   16 |                        122 |                                         391 |
+  |   32 |                        217 |                                         335 |
+  |   64 |                        370 |                                        1012 |
+  |  128 |                        870 |                                        1321 |
+  |  256 |                       2365 |                                        1829 |
+  |  512 |                       8278 |                                        3630 |
+  | 1024 |                      25242 |                                        7795 |
+  | 2048 |                      90478 |                                       13834 |
+  | 4096 |                     291418 |                                        9202 |
+  | 8192 |                    1145210 |                                       12022 |
+
+* Intro
+I last week, I went to LambdaJam (which was awesome, and I highly recommend) and while I was there, went to a workshop about pipes (http://hackage.haskell.org/package/pipes-4.1.1), a stream processing library for Haskell. Later, I was reading its documentation, and I came across a technique for improving the performance of some monadic code.
+
+This blog post is based on the paper Asymptotic Improvement of Computations over Free Monads, by Janis Voigtländer (http://www.iai.uni-bonn.de/~jv/mpc08.pdf).
+
+* What we want to do
+#+BEGIN_QUOTE
+Not only do monads allow [us] to safely encapsulate impure features of the programming language, but they are also used in pure code to separate concerns and provide modular design. But, as usual in software construction, modularity comes at a cost, typically with respect to program efficiency.
+#+END_QUOTE
+
+Imagine we have a simple binary tree type:
+#+BEGIN_SRC scala
+  sealed trait Tree[A] {
+    def flatMap[B](f: A ⇒ Tree[B]): Tree[B]
+  }
+  case class Leaf[A](a: A) extends Tree[A] {
+    def flatMap[B](f: A ⇒ Tree[B]): Tree[B] = f(a)
+  }
+  class Node[A](val l: Tree[A], val r: Tree[A]) extends Tree[A] {
+    def flatMap[B](f: A ⇒ Tree[B]): Tree[B] =
+      new Node(l.flatMap(f), r.flatMap(f))
+  }
+#+END_SRC
+
+We'll define a monad instance for it:
+#+BEGIN_SRC scala
+  implicit object TreeMonad extends Monad[Tree] {
+    def point[A](a: ⇒ A): Tree[A] = Leaf(a)
+    def bind[A, B](fa: Tree[A])(f: A ⇒ Tree[B]): Tree[B] = fa.flatMap(f)
+  }
+#+END_SRC
+
+And furthermore, we'll define a little function to generate full trees for us, and another to traverse them:
+#+BEGIN_SRC scala
+  def fullTree(i: Int): Tree[Int] = i match {
+    case 1 ⇒ Leaf(1)
+    case n ⇒ for {
+      i ← fullTree(n - 1)
+      node ← new Node(Leaf(n - 1 - i), Leaf(i + 1))
+    } yield node
+  }
+  
+  def zigzag(tree: Tree[Int]): Int = {
+    def zig(t: Tree[Int]): Int = t match {
+      case Leaf(n) ⇒ n
+      case n: Node ⇒ zag(n.l)
+    }
+    def zag(t: Tree[Int]): Int = t match {
+      case Leaf(n) ⇒ n
+      case n: Node ⇒ zig(n.r)
+    }
+    zig(tree)
+  }
+#+END_SRC
+
+Note that =fullTree= will generate trees with 2^(n - 1) items, and in particular, the sequence of calls that happens when we evaluate =fullTree(4)=:
+
+#+BEGIN_SRC scala
+  val fn: Int ⇒ Tree[Int] = i ⇒ new Node(Leaf(1 - i), Leaf(i + 1))
+  fullTree(4) = fullTree(3).flatMap(fn)
+              = fullTree(2).flatMap(fn).flatMap(fn)
+              = fullTree(1).flatMap(fn).flatMap(fn).flatMap(fn)
+              = Leaf(1).flatMap(fn).flatMap(fn).flatMap(fn)
+#+END_SRC
+
+As the paper says, note that the repeated =flatMap= calls lead to the inital structure of the tree will be repeatedly traversed. Furthermore, even if we only explore single path through the tree (of length n), we get runtime quadratic in n!
+
+* Scala specific stuff
+Actually, in Scala, we don't. We get exponential behaviour because we will always eagerly create the entire tree, even if we only care about a part of it. Regaining quadratic behaviour is easy though; we just need to slightly change our =Node= definition (which incidentally explains the idiosyncracy of having it not be a case class previously: =val= parameters can't be call-by-name):
+#+BEGIN_SRC scala
+  class Node[A](_l: ⇒ Tree[A], _r: ⇒ Tree[A]) extends Tree[A] {
+    lazy val l = _l
+    lazy val r = _r
+    def flatMap[B](f: A ⇒ Tree[B]): Tree[B] =
+      new Node(l.flatMap(f), r.flatMap(f))
+  }
+#+END_SRC 
+
+* =zigzag= in linear time
+What the paper shows us now is a technique for algorithmic transformation now called codensity, although this name isn't used in the paper. Scalaz provides an implementation at (URL HERE). We use this =Codensity= type to abstract over the leaves of a tree similar to how the dlist package in Haskell implements a list-like structure with constant time append by abstracting over the end of a list.
+
+First, though, we need our tree-building function to be able to build a generic type of tree. The =Monad= type class gives us the sequencing and leaf creation we need, so we just need to implement a =TreeLike= type class to reify the ability to construct =Node=-like instances. For completeness, we'll provide an implementation for our original =Tree= data structure:
+#+BEGIN_SRC scala
+  trait TreeLike[F[_]] {
+    // XXX can ditch CBN here?
+    def node[A](a: ⇒ F[A], b: ⇒ F[A]): F[A]
+  }
+  
+  implicit object TreeTreeLike extends TreeLike[Tree] {
+    def node[A](a: ⇒ Tree[A], b: ⇒ Tree[A]): Tree[A] = new Node(a, b)
+  }
+#+END_SRC
+
+Given this, we can re-write our tree building function to take advantage of it thus:
+#+BEGIN_SRC scala
+  def fullTree2[F[_]](i: Int)(implicit FM: Monad[F], FT: TreeLike[F]): F[Int] = i match {
+    case i ⇒ 1.point[F]
+    case n ⇒ for {
+      i ← fullTree2[F](n - 1)
+      node ← FT.node(FM.point(n - 1 - i), FM.point(i + 1))
+    } yield node
+  }
+#+END_SRC
+
+Note that this is exactly the same algorithm as before; it's simply written in a way that decouples it from the exact tree representation. And if we compare =fullTree(n)= and =fullTree2[Tree](n)= we will see the behave identically.
+
+The trick is, now that we can construct trees in a more general fashion, to make trees of type =Codensity[Tree, Int]=. All we need to do is provide a =TreeLike= instance (and a helper type alias to make things easier):
+#+BEGIN_SRC scala
+  type CodensityTree[A] = Codensity[Tree, A]
+  implicit object CodensityTreeTreeLike extends TreeLike[CodensityTree] {
+    def node[A](a: ⇒ CodensityTree[A], b: ⇒ CodensityTree[A]): CodensityTree[A] =
+      new Codensity[Tree, A] {
+        def apply[B](k: A ⇒ Tree[B]): Tree[B] =
+          TreeTreeLike.node(a.apply(k), b.apply(k))
+      }
+  }
+#+END_SRC
+
+Now, we can generate a =CodensityTree[Int]= via =fullTree2[CodensityTree](n)= but obviously cannot pass this to =zigzag= which expects a plain =Tree[Int]=. Conveniently, =Codensity= sports a method rather aspirationally named =improve= which will give us back the =Tree[Int]= we want, but rather remarkably will give us back a =Tree[Int]= that we can run =zigzag= on /in linear time!/ By way of demonstration, here's some extremely unscientific benchmarking I've done (all timings in µs):
+  |    n | zigzag(fullTree2[Tree](n)) | zigzag(fullTree2[CodensityTree](n).improve) |
+  |------+----------------------------+---------------------------------------------|
+  |    4 |                        157 |                                         192 |
+  |    8 |                        129 |                                         139 |
+  |   16 |                        122 |                                         391 |
+  |   32 |                        217 |                                         335 |
+  |   64 |                        370 |                                        1012 |
+  |  128 |                        870 |                                        1321 |
+  |  256 |                       2365 |                                        1829 |
+  |  512 |                       8278 |                                        3630 |
+  | 1024 |                      25242 |                                        7795 |
+  | 2048 |                      90478 |                                       13834 |
+  | 4096 |                     291418 |                                        9202 |
+  | 8192 |                    1145210 |                                       12022 |
+
+It's worth noting that with eager evaluation, even =zigzag(fullTree2[Tree](32))= took more than five minutes to complete (I got bored waiting).
+
+* In the real world
+This definitely has application beyond what happens in toy examples. Using =Codensity= basically has two effects: fmap fusion and making bind right associative. *fmap fusion* means that calls =Codensity= effectively rewrites code from =a.map(f).map(g).map(h)= (where =f=, =g=, and =h= are functions) to =a.map(f.map(g).map(h))=, avoiding the cost of repeatedly rebuilding the context of =a= (this is a safe re-write, thanks to the functor laws). *Making bind right associative* means that it transforms code from =a.flatMap(f).flatMap(g)= to =a.flatMap(x ⇒ f(x).flatMap(g))=. The cost saving here again is that by performing the binds in a right-associative way, we avoid repeatedly tearing down and re-creating structure. This is covered very nicely in Ed Kmett's blog series Free Monads for Less (http://comonad.com/reader/2011/free-monads-for-less/) and indeed the free monad (which is very frequently used) is one that can benefit from this transformation.
+
+Another nice real world example is in the pipes library, where as I mentioned I discovered this technique. A note at the end of the tutorial (http://hackage.haskell.org/package/pipes-4.1.1/docs/Pipes-Tutorial.html) notes that the =mapM=, =replicateM=, and =sequence= functions lead to quadratic time complexity when used with pipes. The solution is again to wrap the use of these functions in Codensity, with the following example provided (the type =Consumer a m [a]= represents a consumer that reads values of type =a= and results in a value of type =[a]= in some monadic type =m=):
+#+BEGIN_SRC haskell
+  quadratic :: Monad m => Int -> Consumer a m [a]
+  quadratic n = replicateM n await
+  
+  linear :: Monad m => Int -> Consumer a m [a]
+  linear n = lowerCodensity $ replicate M n $ lift await
+#+END_SRC
+
+* More reading
+Ed Kmett's blog post series that I mention above details how the simpler abstraction of the Yoneda lemma can be used instead of Codensity to provide the same effect; Yoneda provides only fmap fusion but this turns out to be sufficient.
+
+Rúnar Bjarnason has also blogged about free monads and the Yoneda lemma (http://blog.higher-order.com/blog/2013/11/01/free-and-yoneda/); linked from the blog are the slides from a talk he gave.
+
+
+
+#+BEGIN_SRC scala
+  val fn: Int ⇒ Tree[Int] = i ⇒ Node(Leaf(1 - i), Leaf(i + 1))
+  fullTree(4) = fullTree(3).flatMap(fn)
+  = fullTree(2).flatMap(fn).flatMap(fn)
+  = fullTree(1).flatMap(fn).flatMap(fn).flatMap(fn)
+  = Leaf(1).flatMap(fn).flatMap(fn).flatMap(fn)
+  
+  = fn(1).flatMap(fn).flatMap(fn)
+  = Node(Leaf(0), Leaf(2)).flatMap(fn).flatMap(fn)
+  = Node(Leaf(0).flatMap(fn), Leaf(2).flatMap(fn)).flatMap(fn)
+  = Node(Node(Leaf(1), Leaf(1)), Node(Leaf(-1), Leaf(3))).flatMap(fn)
+  = Node(Node(Leaf(1), Leaf(1)).flatMap(fn), Node(Leaf(-1), Leaf(3)).flatMap(fn))
+  = Node(Node(Node(Leaf(0), Leaf(2)), Node(Leaf(0), Leaf(2))), Node(Node(Leaf(2), Leaf(0)), Node(Leaf(-2), Leaf(4))))
+  
+  
+  
+    sealed trait Tree[A] {
+      def flatMap[B](f: A => Tree[B]): Tree[B]
+    }
+    case class Leaf[A](a: A) extends Tree[A] {
+      def flatMap[B](f: A => Tree[B]): Tree[B] = f(a)
+    }
+    class Node[A](_l: => Tree[A], _r: => Tree[A]) extends Tree[A] {
+      lazy val l = _l
+      lazy val r = _r
+      def flatMap[B](f: A => Tree[B]): Tree[B] =
+        new Node(l.flatMap(f), r.flatMap(f))
+      override def toString = s"Node($l, $r)"
+    }
+    implicit object TreeMonad extends Monad[Tree] {
+      def point[A](a: => A): Tree[A] = Leaf(a)
+      def bind[A, B](fa: Tree[A])(f: A => Tree[B]): Tree[B] = fa.flatMap(f)
+    }
+    val fn: Int => Tree[Int] = i => new Node(Leaf(1 - i), Leaf(i + 1))
+    def fullTree(i: Int): Tree[Int] = i match {
+      case 1 => Leaf(1)
+      case n => for {
+        i <- fullTree(n - 1)
+        node <- new Node(Leaf(n - 1 - i), Leaf(i + 1)): Tree[Int]
+      } yield node
+    }
+    
+    def zigzag(tree: Tree[Int]): Int = {
+      def zig(t: Tree[Int]): Int = t match {
+        case Leaf(n) => n
+        case n: Node[Int] => zag(n.l)
+      }
+      def zag(t: Tree[Int]): Int = t match {
+        case Leaf(n) => n
+        case n: Node[Int] => zig(n.r)
+      }
+      zig(tree)
+    }
+  
+#+END_SRC
+
+Problem set
+http://blog.ezyang.com/2012/01/problem-set-the-codensity-transformation/
