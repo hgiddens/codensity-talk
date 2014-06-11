@@ -139,7 +139,7 @@
   - and /fullTree/ is constructing things lazily for us
   - so of course, calling /zigzag(fullTree(n))/ our performance is… polynomial.
   [[./tmp/quad-small.png]]
-* SAD TROMBONE NOISE
+* Moderately sad trombone noise
   - The cost is in building the tree
   - But not due to its final size
   - It's due instead to the repeated creation and destruction of the intermediate trees
