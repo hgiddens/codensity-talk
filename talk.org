@@ -1,3 +1,6 @@
+* CODENSITY I guess
+  Hugh Giddens
+  @hg_
 * LambdaJam 2014
   - Mark gave stream processing workshop
     - So in a way, this is all his fault.
