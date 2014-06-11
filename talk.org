@@ -1,33 +1,33 @@
-* went to lambda jam
-  - mark gave stream processing workshop
-  - covered pipes, conduit (haskell) and scalaz-stream
-  - i used pipes
-* what just happened?
-  - didn't really get to grips well with pipes during the workshop
-  - tried to understand what the hell was going on
-  - found some documentation and read it
-* pipes tutorial
-#+BEGIN_QUOTE
-There are three functions that give quadratic time complexity when used in within =pipes=:
-- sequence
-- replicateM
--mapM
-…
-The solution is to use the "codensity transformation" to transform the code to
-run with linear time complexity.
-#+END_QUOTE
-* wat
-#+BEGIN_SRC haskell
-  quadratic :: Int -> Consumer a m [a]
-  quadratic n = replicateM n await
+* LambdaJam 2014
+  - Mark gave stream processing workshop
+  - Didn't really get to grips well with pipes during the workshop
+  - Tried to understand what the hell was going on
+  - Found some documentation and read it
+    #+BEGIN_QUOTE
+    There are three functions that give polynomial time complexity when used in within pipes:
+    - sequence
+    - replicateM
+    - mapM
+    …
+    The solution is to use the "codensity transformation" to transform the code to
+    run with linear time complexity.
+    #+END_QUOTE
+* Wat
+  #+BEGIN_QUOTE
+  The solution is to use the "codensity transformation" to transform the code to
+  run with linear time complexity.
+  #+END_QUOTE
+  #+BEGIN_SRC haskell
+    quadratic :: Int -> Consumer a m [a]
+    quadratic n = replicateM n await
+  
+    linear :: Monad m => Int -> Consumer a m [a]
+    linear n = lowerCodensity $ replicateM n $ lift await
+  #+END_SRC
 
-  linear :: Monad m => Int -> Consumer a m [a]
-  linear n = lowerCodensity $ replicateM n $ lift await
-#+END_SRC
-
-This is clearly magic
-* Codensity in Scalaz
-  - There's a Codensity type in Scalaz
+  This is clearly magic
+* /Codensity/ in Scalaz
+  - There's a /Codensity/ type in Scalaz
   #+BEGIN_SRC scala
     trait Codensity[F[+_], +A] { self =>
       def apply[B](f: A => F[B]): F[B]
@@ -42,7 +42,6 @@ This is clearly magic
     }
   #+END_SRC
   - I had no idea what this did
-  - Time to investigate
 * Asymptotic Improvement of Computations over Free Monads
   - A paper by Janis Voigtländer
   #+BEGIN_QUOTE
@@ -57,14 +56,14 @@ This is clearly magic
   #+END_QUOTE
   - This sounds promising!
   - Paper has a nice simple example of the approach, using balanced binary trees
-* A Tree type
+* A /Tree/ type
   - A simple, boring, binary tree data type
   #+BEGIN_SRC scala
     sealed trait Tree[A]
     case class Leaf[A](a: A) extends Tree[A]
     case class Node[A](l: Tree[A], r: Tree[A]) extends Tree[A]
   #+END_SRC
-  - With a monad instance, where =bind= runs a function over the leaf nodes
+  - With a monad instance, where /bind/ runs a function over the leaf nodes
   #+BEGIN_SRC scala
     implicit object treeMonad extends Monad[Tree] {
       def point[A](a: => A): Tree[A] = Leaf(a)
@@ -128,37 +127,51 @@ This is clearly magic
     }
   #+END_SRC
 * And how does it perform?
-  - =zigzag=, for a tree of depth n, needs to look at n nodes
-  - and =fullTree= is constructing things lazily for us
-  - so of course, calling =zigzag(fullTree(n))= our performance is…
+  - /zigzag/, for a tree of depth n, needs to look at n nodes
+  - and /fullTree/ is constructing things lazily for us
+  - so of course, calling /zigzag(fullTree(n))/ our performance is…
 * And how does it perform?
-  - =zigzag=, for a tree of depth n, needs to look at n nodes
-  - and =fullTree= is constructing things lazily for us
-  - so of course, calling =zigzag(fullTree(n))= our performance is… quadratic.
+  - /zigzag/, for a tree of depth n, needs to look at n nodes
+  - and /fullTree/ is constructing things lazily for us
+  - so of course, calling /zigzag(fullTree(n))/ our performance is… polynomial.
   [[./tmp/quad-small.png]]
-* Why?
+* SAD TROMBONE NOISE
   - The cost is in building the tree
   - But not due to its final size
   - It's due instead to the repeated creation and destruction of the intermediate trees
-* TODO Consider the sequence of calls here
-// simplified function here
-val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(1))
+      = zigzag(Leaf(1)) // 1 leaf
+  #+END_SRC
 
-zigzag(fullTree(1))
- = zigzag(Leaf(1)) // 1 leaf
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(2))
+      = zigzag(fullTree(1).flatMap(fn))
+      = zigzag(Leaf(1).flatMap(fn)) // 1 leaf
+      = zigzag(Node(<thunk>, <thunk>)) // 1 node
+      = zigzag(Node(Leaf(0), <thunk>)) // 1 leaf
+      = 0 // Total of 1 node and two leaves allocated
+  #+END_SRC
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(3))
+      = zigzag(fullTree(2).flatMap(fn))
+      = zigzag(Node(<thunk>, <thunk>).flatMap(fn)) // 1 leaf, 1 node (from fullTree(2))
+      = zigzag(Node(Leaf(0).flatMap(fn), <thunk>)) // 1 leaf
+      = zigzag(Node(Node(<thunk>, <thunk>))) // 2 nodes
+      = zigzag(Node(Node(<thunk>, Leaf(1)))) // 1 leaf
+      = 1 // Total of 3 nodes and 3 leaves allocated
+  #+END_SRC
 
-zigzag(fullTree(2))
-= zigzag(fullTree(1).flatMap(fn))
-= zigzag(Leaf(1).flatMap(i => Node(<thunk>, <thunk>))) // 1 leaf, 1 node
-= zigzag(Leaf(1).flatMap(i => Node(Leaf(i - 1), <thunk>))) // 1 leaf
-
-zigzag(fullTree(3))
- = zigzag(fullTree(2).flatMap(fn))
- = zigzag(Node(<thunk>, <thunk>).flatMap(fn)) // 1 node
- = zigzag(Node(Leaf(0).flatMap(fn), <thunk>)) // 2 leaves, 1 node (from fullTree(2))
- = zigzag(Node(Node(<thunk>, Leaf(1)), <thunk>)) // 1 node, 1 leaf
-
-And so on; for a tree of depth n, =fullTree= will create (n^2 - n)/2 nodes and n leaves.
+  And so on; for a tree of depth n, /fullTree/ will create (n^2 - n)/2 nodes and n leaves.
 * So how can we use Codensity to help us?
   - Uses a typeclass to provide the ‘make a node’ operation
     #+BEGIN_SRC scala
@@ -172,7 +185,7 @@ And so on; for a tree of depth n, =fullTree= will create (n^2 - n)/2 nodes and n
       }
     #+END_SRC
 * So how can we use Codensity to help us?
-  - Using our new type class, make =fullTree= generate a full tree of some
+  - Using our new type class, make /fullTree/ generate a full tree of some
     abstract type
     #+BEGIN_SRC scala
       def fullTree[F[_]: Monad](i: Int)(implicit FT: TreeLike[F]): F[Int] =
@@ -186,14 +199,14 @@ And so on; for a tree of depth n, =fullTree= will create (n^2 - n)/2 nodes and n
         }
       
     #+END_SRC
-  - A quick test here demonstrates that =zigzag(fullTree[Tree](n))= still
-    behaves quadratically
+  - A quick test here demonstrates that /zigzag(fullTree[Tree](n))/ still
+    behaves polynomialally
 * So how can we use Codensity to help us?
-  - Make a type alias for our Codensity-using tree
+  - Make a type alias for our /Codensity/-using tree
     #+BEGIN_SRC scala
       type CodensityTree[A] = Codensity[Tree, A]
     #+END_SRC
-  - Define a =TreeLike= instance for =CodensityTree=
+  - Define a /TreeLike/ instance for /CodensityTree/
     #+BEGIN_SRC scala
       implicit object codensityTreeTreeLike extends TreeLike[CodensityTree] {
         def node[A](l: => CodensityTree[A], r: => CodensityTree[A]): CodensityTree[A] =
@@ -204,43 +217,143 @@ And so on; for a tree of depth n, =fullTree= will create (n^2 - n)/2 nodes and n
       }
     #+END_SRC
 * So how can we use Codensity to help us?
-  - Now, we can call =fullTree[CodensityTree](n)=, and get a
-    =Codensity[Tree, Int]= back
-  - But =zigzag= needs one of our original =Tree[Int]= values.
-  - Time for the promisingly named method =improve=:
+  - Now, we can call /fullTree[CodensityTree](n)/, and get a
+    /Codensity[Tree, Int]/ back
+  - But /zigzag/ needs one of our original /Tree[Int]/ values.
+  - Time for the promisingly named method /improve/:
     #+BEGIN_SRC scala
     trait Codensity[F[_], A] {
       def improve(implicit F: Applicative[F]): F[A] =
         apply(a => F.point(a))
     #+END_SRC
-  - And when we run =zigzag(fullTree[CodensityTree](n).improve)= …
+  - And when we run /zigzag(fullTree[CodensityTree](n).improve)/ …
 * So how can we use Codensity to help us?
-  - Now, we can call =fullTree[CodensityTree](n)=, and get a
-    =Codensity[Tree, Int]= back
-  - But =zigzag= needs one of our original =Tree[Int]= values.
-  - Time for the promisingly named method =improve=:
+  - Now, we can call /fullTree[CodensityTree](n)/, and get a
+    /Codensity[Tree, Int]/ back
+  - But /zigzag/ needs one of our original /Tree[Int]/ values.
+  - Time for the promisingly named method /improve/:
     #+BEGIN_SRC scala
     trait Codensity[F[_], A] {
       def improve(implicit F: Applicative[F]): F[A] =
         apply(a => F.point(a))
     #+END_SRC
-  - And when we run =zigzag(fullTree[CodensityTree](n).improve)= we see that
+  - And when we run /zigzag(fullTree[CodensityTree](n).improve)/ we see that
     we do, indeed, get linear performance:
     [[./tmp/linear-small.png]]
 * So how can we use Codensity to help us
   The constant factors are ok too:
   [[./tmp/all-small.png]]
-* TODO How does this work?
-  example of call expansion
-  contrast with repeated creation/destruction intermediate state
-  fmap fusion
-  right associative binds
-* TODO real world examples
-  right associative binds helping with free monads
-  pipes things mentioned above
-  set functor
-  bonus round:yoneda
-* links
-paper
-ed kmett's blog
-code & stuff
+* How does this work?
+  Recall how /zigzag(fullTree[Tree](3))/ expanded as the following
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(3))
+      = zigzag(fullTree(2).flatMap(fn))
+      = zigzag(Node(<thunk>, <thunk>).flatMap(fn)) // 1 leaf, 1 node (from fullTree(2))
+      = zigzag(Node(Leaf(0).flatMap(fn), <thunk>)) // 1 leaf
+      = zigzag(Node(Node(<thunk>, <thunk>))) // 2 nodes
+      = zigzag(Node(Node(<thunk>, Leaf(1)))) // 1 leaf
+      = 1 // Total of 3 nodes and 3 leaves allocated
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    val fn: Int => CodensityTree[Int] = { i =>
+      codensityTreeTreeLike.node(
+        (i - 1).point[CodensityTree],
+        (i + 1).point[CodensityTree])
+    }
+    
+    zigzag(fullTree[CodensityTree](1).improve)
+      = zigzag(new Codensity[Tree, Int] {
+        def apply[B](f: Int => Tree[B]) = f(1)
+      }.improve) // 1 codensitytree
+      = zigzag(new Codensity[Tree, Int] {
+        def apply[B](f: Int => Tree[B]) = f(1)
+      }.apply(Leaf(_)))
+      = zigzag(Leaf(1)) // 1 leaf
+      = 1 // Total of 1 CodensityTree and 1 Leaf
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    zigzag(fullTree[CodensityTree](2).improve)
+      = zigzag(fullTree(1).flatMap(fn).improve) // 1 CodensityTree
+      = zigzag(new Codensity[Tree, Int] {
+                 def apply[B](f: Int => Tree[B]) =
+                   fullTree(1).apply(a => fn(a)(f))
+               }.improve) // 1 CodensityTree
+      // Tree built; run improve
+      = zigzag(fullTree(1).apply(a => fn(a)(Leaf(_))))
+      = zigzag(fn(1)(Leaf(_)))
+      = zigzag(new Codensity[Tree, Int] {
+                 def apply[B](f: Int => Tree[B]) =
+                   new Node(<thunk>.apply(f), <thunk>)
+               }.apply(Leaf(_))) // 1 CodensityTree
+      = zigzag(new Node(new Codensity[Tree, Int] {
+                          def apply[B](f: Int => Tree[B]) = f(0)
+                        }.apply(Leaf(_)), <thunk>)) // 1 CodensityTree, 1 Node
+      = zigzag(new Node(Leaf(0), <thunk>))
+      = 0 // 3 CodensityTrees, 1 Node, and 1 Leaf allocated
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  In general
+  - to build a /CodensityTree/ of depth n:
+    n /CodensityTree/ instances
+  - to subsequently run /zigzag(t.improve)/
+    n /CodensityTree/ instances
+    (n - 1) /Node/ instances
+    1 /Leaf/ instance
+* Under the hood
+** Makes binds right-associative
+   - One consequence of using /Codensity/ is that it makes binds right associative
+   - For example
+     #+BEGIN_SRC scala
+       // ‘Left associative binds’ are easier to write, but here creates and destroys
+       // intermediate data structures unnecessarily:
+       List(1,2).flatMap(fn_a).flatMap(fn_b)
+       
+       // Right associative binds are a little easier on the garbage collector, but a
+       // little less pleasant to write:
+       List(1,2).flatMap(x => fn_a(x).flatMap(fn_b))
+       
+       // This performs the binds in the right associative fashion as with the second
+       // example above without requiring the binds be written right-associatively
+       Codensity.rep(List(1,2)).flatMap(fn_a).flatMap(fn_b).improve
+     #+END_SRC
+   - This is a safe transformation thanks to the monad laws!
+   - So can create problems for ‘monads’ that don't follow them e.g. /ListT/
+     in Haskell.
+** fmap fusion
+   #+BEGIN_SRC scala
+     // Similarly to bind, repeated map calls can also lead to the excessive
+     // creation and destruction of intermediate data structures.
+     //
+     // After each map call here an intermediate list is generated only to shortly
+     // become garbage.
+     List(1,2).map(foo).map(bar).map(baz)
+     
+     // This can be avoided by composing the functions:
+     List(1,2).map(foo.map(bar).map(baz))
+     
+     // Codensity ‘fuses’ the mapped functions together, such that this behaves as
+     // the example above.
+     Codensity.rep(List(1,2)).map(foo).map(bar).map(baz).improve
+   #+END_SRC
+   
+   - Use this to create a /Functor[Codensity[Set, _]]/ and amuse and/or dismay
+     your friends!
+   - This can also achieved via the (simpler) Yoneda lemma
+* Real world examples
+  - As hinted at by the title of the paper, this can be especially helpful
+    with code that makes heavy use of the free monad
+  - Haskell's pipes library uses this to avoid polynomial space growth when
+    buiding lists from streams
+  - BONUS ROUND: All this can apparently be achieved using only Yoneda but
+    sometimes when I close my eyes I still see the compiler errors.
+* Links
+  - Asymptotic Improvement of Computations over Free Monads, by Janis Voigtländer
+    http://www.iai.uni-bonn.de/~jv/mpc08.pdf
+  - Ed Kmett has a blog series about this, starting with ‘Free Monads for less’. Good luck!
+    http://comonad.com/reader/2011/free-monads-for-less/
+  - This will theoretically be pushed to Bitbucket at some point.
+    https://bitbucket.org/hgiddens/codensity-talk
