@@ -1,0 +1,246 @@
+* went to lambda jam
+  - mark gave stream processing workshop
+  - covered pipes, conduit (haskell) and scalaz-stream
+  - i used pipes
+* what just happened?
+  - didn't really get to grips well with pipes during the workshop
+  - tried to understand what the hell was going on
+  - found some documentation and read it
+* pipes tutorial
+#+BEGIN_QUOTE
+There are three functions that give quadratic time complexity when used in within =pipes=:
+- sequence
+- replicateM
+-mapM
+…
+The solution is to use the "codensity transformation" to transform the code to
+run with linear time complexity.
+#+END_QUOTE
+* wat
+#+BEGIN_SRC haskell
+  quadratic :: Int -> Consumer a m [a]
+  quadratic n = replicateM n await
+
+  linear :: Monad m => Int -> Consumer a m [a]
+  linear n = lowerCodensity $ replicateM n $ lift await
+#+END_SRC
+
+This is clearly magic
+* Codensity in Scalaz
+  - There's a Codensity type in Scalaz
+  #+BEGIN_SRC scala
+    trait Codensity[F[+_], +A] { self =>
+      def apply[B](f: A => F[B]): F[B]
+      def improve(implicit F: Applicative[F]): F[A] =
+        apply(a => F.point(a))
+      def flatMap[B](k: A => Codensity[F, B]): Codensity[F, B] = {
+        new Codensity[F, B] {
+          def apply[C](h: B => F[C]): F[C] = 
+            self.apply(a => k(a)(h))
+        }
+      }
+    }
+  #+END_SRC
+  - I had no idea what this did
+  - Time to investigate
+* Asymptotic Improvement of Computations over Free Monads
+  - A paper by Janis Voigtländer
+  #+BEGIN_QUOTE
+  Not only do monads allow [us] to safely encapsulate impure features of the
+  programming language, but they are also used in pure code to separate
+  concerns and provide modular design. But, as usual in software construction,
+  modularity comes at a cost, typically with respect to program efficiency. We
+  propose a method to improve the efficiency of code over a large variety of
+  monads. A distinctive feature is that this method is non-intrusive: it
+  preserves the appearance of code, with the obvious software engineering
+  benefits.
+  #+END_QUOTE
+  - This sounds promising!
+  - Paper has a nice simple example of the approach, using balanced binary trees
+* A Tree type
+  - A simple, boring, binary tree data type
+  #+BEGIN_SRC scala
+    sealed trait Tree[A]
+    case class Leaf[A](a: A) extends Tree[A]
+    case class Node[A](l: Tree[A], r: Tree[A]) extends Tree[A]
+  #+END_SRC
+  - With a monad instance, where =bind= runs a function over the leaf nodes
+  #+BEGIN_SRC scala
+    implicit object treeMonad extends Monad[Tree] {
+      def point[A](a: => A): Tree[A] = Leaf(a)
+      def bind[A, B](fa: Tree[A])(f: A => Tree[B]) = fa match {
+        case Leaf(a) => f(a)
+        case Node(l, r) => Node(bind(l)(f), bind(r)(f))
+      }
+    }
+  #+END_SRC
+* A function to generate trees
+  #+BEGIN_SRC scala
+    def fullTree(i: Int): Tree[Int] = i match {
+      case 1 => Leaf(1)
+      case n =>
+        val j = n - 1
+        fullTree(j).flatMap { t =>
+          Node(Leaf(j - t), Leaf(t + 1))
+        }
+    }
+  #+END_SRC
+
+  This function will generate trees of the following form:
+  #+BEGIN_SRC scala
+    Leaf(1) // i = 1
+    Node(
+      Leaf(0), Leaf(2)) // i = 2
+    Node(
+      Node(
+        Leaf(2), Leaf(1)),
+      Node(
+        Leaf(0), Leaf(3))) // i = 3
+    // And so on
+  #+END_SRC
+* The thing about creating trees with 2^n nodes
+  - It turns out that, given a large n, it can take quite a while to create a tree with 2^n nodes.
+  - The Haskell examples in the paper don't exhibit this problem due to lazy evaluation
+  - We can use call-by-name to fix this
+** We had
+   #+BEGIN_SRC scala
+     case class Node[A](l: Tree[A], r: Tree[A]) extends Tree[A]
+   #+END_SRC
+** We'll instead use
+   #+BEGIN_SRC scala
+     class Node[A](_l: => Tree[A], _r: => Tree[A]) extends Tree[A] {
+       lazy val l = _l
+       lazy val r = _r
+     }
+   #+END_SRC
+* And some function to traverse them
+  #+BEGIN_SRC scala
+    def zigzag(tree: Tree[Int]): Int = {
+      def zig(t: Tree[Int]): Int = t match {
+        case Leaf(n) => n
+        case n: Node[Int] => zag(n.l)
+      }
+      def zag(t: Tree[Int]): Int = t match {
+        case Leaf(n) => n
+        case n: Node[Int] => zig(n.r)
+      }
+      zig(tree)
+    }
+  #+END_SRC
+* And how does it perform?
+  - =zigzag=, for a tree of depth n, needs to look at n nodes
+  - and =fullTree= is constructing things lazily for us
+  - so of course, calling =zigzag(fullTree(n))= our performance is…
+* And how does it perform?
+  - =zigzag=, for a tree of depth n, needs to look at n nodes
+  - and =fullTree= is constructing things lazily for us
+  - so of course, calling =zigzag(fullTree(n))= our performance is… quadratic.
+  [[./tmp/quad-small.png]]
+* Why?
+  - The cost is in building the tree
+  - But not due to its final size
+  - It's due instead to the repeated creation and destruction of the intermediate trees
+* TODO Consider the sequence of calls here
+// simplified function here
+val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+
+zigzag(fullTree(1))
+ = zigzag(Leaf(1)) // 1 leaf
+
+zigzag(fullTree(2))
+= zigzag(fullTree(1).flatMap(fn))
+= zigzag(Leaf(1).flatMap(i => Node(<thunk>, <thunk>))) // 1 leaf, 1 node
+= zigzag(Leaf(1).flatMap(i => Node(Leaf(i - 1), <thunk>))) // 1 leaf
+
+zigzag(fullTree(3))
+ = zigzag(fullTree(2).flatMap(fn))
+ = zigzag(Node(<thunk>, <thunk>).flatMap(fn)) // 1 node
+ = zigzag(Node(Leaf(0).flatMap(fn), <thunk>)) // 2 leaves, 1 node (from fullTree(2))
+ = zigzag(Node(Node(<thunk>, Leaf(1)), <thunk>)) // 1 node, 1 leaf
+
+And so on; for a tree of depth n, =fullTree= will create (n^2 - n)/2 nodes and n leaves.
+* So how can we use Codensity to help us?
+  - Uses a typeclass to provide the ‘make a node’ operation
+    #+BEGIN_SRC scala
+      trait TreeLike[F[_]] {
+        def node[A](l: => F[A], r: => F[A]): F[A]
+      }
+      
+      implicit object treeTreeLike extends TreeLike[Tree] {
+        def node[A](l: => Tree[A], r: => Tree[A]): Tree[A] =
+          new Node(l, r)
+      }
+    #+END_SRC
+* So how can we use Codensity to help us?
+  - Using our new type class, make =fullTree= generate a full tree of some
+    abstract type
+    #+BEGIN_SRC scala
+      def fullTree[F[_]: Monad](i: Int)(implicit FT: TreeLike[F]): F[Int] =
+        i match {
+          case 1 => 1.point[F]
+          case n =>
+            val j = n - 1
+            fullTree[F](j).flatMap { t =>
+              FT.node((j - 1).point[F], (j + 1).point[F])
+            }
+        }
+      
+    #+END_SRC
+  - A quick test here demonstrates that =zigzag(fullTree[Tree](n))= still
+    behaves quadratically
+* So how can we use Codensity to help us?
+  - Make a type alias for our Codensity-using tree
+    #+BEGIN_SRC scala
+      type CodensityTree[A] = Codensity[Tree, A]
+    #+END_SRC
+  - Define a =TreeLike= instance for =CodensityTree=
+    #+BEGIN_SRC scala
+      implicit object codensityTreeTreeLike extends TreeLike[CodensityTree] {
+        def node[A](l: => CodensityTree[A], r: => CodensityTree[A]): CodensityTree[A] =
+          new Codensity[Tree, A] {
+            def apply[B](f: A => Tree[B]) =
+              new Node(l.apply(f), r.apply(f))
+          }
+      }
+    #+END_SRC
+* So how can we use Codensity to help us?
+  - Now, we can call =fullTree[CodensityTree](n)=, and get a
+    =Codensity[Tree, Int]= back
+  - But =zigzag= needs one of our original =Tree[Int]= values.
+  - Time for the promisingly named method =improve=:
+    #+BEGIN_SRC scala
+    trait Codensity[F[_], A] {
+      def improve(implicit F: Applicative[F]): F[A] =
+        apply(a => F.point(a))
+    #+END_SRC
+  - And when we run =zigzag(fullTree[CodensityTree](n).improve)= …
+* So how can we use Codensity to help us?
+  - Now, we can call =fullTree[CodensityTree](n)=, and get a
+    =Codensity[Tree, Int]= back
+  - But =zigzag= needs one of our original =Tree[Int]= values.
+  - Time for the promisingly named method =improve=:
+    #+BEGIN_SRC scala
+    trait Codensity[F[_], A] {
+      def improve(implicit F: Applicative[F]): F[A] =
+        apply(a => F.point(a))
+    #+END_SRC
+  - And when we run =zigzag(fullTree[CodensityTree](n).improve)= we see that
+    we do, indeed, get linear performance:
+    [[./tmp/linear-small.png]]
+* So how can we use Codensity to help us
+  The constant factors are ok too:
+  [[./tmp/all-small.png]]
+* TODO How does this work?
+  example of call expansion
+  contrast with repeated creation/destruction intermediate state
+  fmap fusion
+  right associative binds
+* TODO real world examples
+  right associative binds helping with free monads
+  pipes things mentioned above
+  set functor
+  bonus round:yoneda
+* links
+paper
+ed kmett's blog
+code & stuff
