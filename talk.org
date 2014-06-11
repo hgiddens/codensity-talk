@@ -1,5 +1,6 @@
 * LambdaJam 2014
   - Mark gave stream processing workshop
+    - So in a way, this is all his fault.
   - Didn't really get to grips well with pipes during the workshop
   - Tried to understand what the hell was going on
   - Found some documentation and read it
@@ -153,10 +154,69 @@
     
     zigzag(fullTree(2))
       = zigzag(fullTree(1).flatMap(fn))
+  #+END_SRC
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(2))
+      = zigzag(fullTree(1).flatMap(fn))
+      = zigzag(Leaf(1).flatMap(fn)) // 1 leaf
+  #+END_SRC
+
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(2))
+      = zigzag(fullTree(1).flatMap(fn))
+      = zigzag(Leaf(1).flatMap(fn)) // 1 leaf
+      = zigzag(Node(<thunk>, <thunk>)) // 1 node
+  #+END_SRC
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(2))
+      = zigzag(fullTree(1).flatMap(fn))
       = zigzag(Leaf(1).flatMap(fn)) // 1 leaf
       = zigzag(Node(<thunk>, <thunk>)) // 1 node
       = zigzag(Node(Leaf(0), <thunk>)) // 1 leaf
       = 0 // Total of 1 node and two leaves allocated
+  #+END_SRC
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(3))
+      = zigzag(fullTree(2).flatMap(fn))
+  #+END_SRC
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(3))
+      = zigzag(fullTree(2).flatMap(fn))
+      = zigzag(Node(<thunk>, <thunk>).flatMap(fn)) // 1 leaf, 1 node (from fullTree(2))
+  #+END_SRC
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(3))
+      = zigzag(fullTree(2).flatMap(fn))
+      = zigzag(Node(<thunk>, <thunk>).flatMap(fn)) // 1 leaf, 1 node (from fullTree(2))
+      = zigzag(Node(Leaf(0).flatMap(fn), <thunk>)) // 1 leaf
+  #+END_SRC
+* Consider the sequence of calls here
+  #+BEGIN_SRC scala
+    val fn: Int => Tree[Int] = i => Node(Leaf(i - 1), Leaf(i + 1))
+    
+    zigzag(fullTree(3))
+      = zigzag(fullTree(2).flatMap(fn))
+      = zigzag(Node(<thunk>, <thunk>).flatMap(fn)) // 1 leaf, 1 node (from fullTree(2))
+      = zigzag(Node(Leaf(0).flatMap(fn), <thunk>)) // 1 leaf
+      = zigzag(Node(Node(<thunk>, <thunk>))) // 2 nodes
   #+END_SRC
 * Consider the sequence of calls here
   #+BEGIN_SRC scala
@@ -241,7 +301,7 @@
     we do, indeed, get linear performance:
     [[./tmp/linear-small.png]]
 * So how can we use Codensity to help us
-  The constant factors are ok too:
+  As promised, we didn't have to change the implementation of /fullTree/ (after we'd made it generic in the type of tree that it constructs). The constant factors are ok too:
   [[./tmp/all-small.png]]
 * How does this work?
   Recall how /zigzag(fullTree[Tree](3))/ expanded as the following
@@ -268,11 +328,112 @@
       = zigzag(new Codensity[Tree, Int] {
         def apply[B](f: Int => Tree[B]) = f(1)
       }.improve) // 1 codensitytree
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    val fn: Int => CodensityTree[Int] = { i =>
+      codensityTreeTreeLike.node(
+        (i - 1).point[CodensityTree],
+        (i + 1).point[CodensityTree])
+    }
+    
+    zigzag(fullTree[CodensityTree](1).improve)
+      = zigzag(new Codensity[Tree, Int] {
+        def apply[B](f: Int => Tree[B]) = f(1)
+      }.improve) // 1 codensitytree
+      = zigzag(new Codensity[Tree, Int] {
+        def apply[B](f: Int => Tree[B]) = f(1)
+      }.apply(Leaf(_)))
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    val fn: Int => CodensityTree[Int] = { i =>
+      codensityTreeTreeLike.node(
+        (i - 1).point[CodensityTree],
+        (i + 1).point[CodensityTree])
+    }
+    
+    zigzag(fullTree[CodensityTree](1).improve)
+      = zigzag(new Codensity[Tree, Int] {
+        def apply[B](f: Int => Tree[B]) = f(1)
+      }.improve) // 1 codensitytree
       = zigzag(new Codensity[Tree, Int] {
         def apply[B](f: Int => Tree[B]) = f(1)
       }.apply(Leaf(_)))
       = zigzag(Leaf(1)) // 1 leaf
       = 1 // Total of 1 CodensityTree and 1 Leaf
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    zigzag(fullTree[CodensityTree](2).improve)
+      = zigzag(fullTree(1).flatMap(fn).improve) // 1 CodensityTree
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    zigzag(fullTree[CodensityTree](2).improve)
+      = zigzag(fullTree(1).flatMap(fn).improve) // 1 CodensityTree
+      = zigzag(new Codensity[Tree, Int] {
+                 def apply[B](f: Int => Tree[B]) =
+                   fullTree(1).apply(a => fn(a)(f))
+               }.improve) // 1 CodensityTree
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    zigzag(fullTree[CodensityTree](2).improve)
+      = zigzag(fullTree(1).flatMap(fn).improve) // 1 CodensityTree
+      = zigzag(new Codensity[Tree, Int] {
+                 def apply[B](f: Int => Tree[B]) =
+                   fullTree(1).apply(a => fn(a)(f))
+               }.improve) // 1 CodensityTree
+      // Tree built; run improve
+      = zigzag(fullTree(1).apply(a => fn(a)(Leaf(_))))
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    zigzag(fullTree[CodensityTree](2).improve)
+      = zigzag(fullTree(1).flatMap(fn).improve) // 1 CodensityTree
+      = zigzag(new Codensity[Tree, Int] {
+                 def apply[B](f: Int => Tree[B]) =
+                   fullTree(1).apply(a => fn(a)(f))
+               }.improve) // 1 CodensityTree
+      // Tree built; run improve
+      = zigzag(fullTree(1).apply(a => fn(a)(Leaf(_))))
+      = zigzag(fn(1)(Leaf(_)))
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    zigzag(fullTree[CodensityTree](2).improve)
+      = zigzag(fullTree(1).flatMap(fn).improve) // 1 CodensityTree
+      = zigzag(new Codensity[Tree, Int] {
+                 def apply[B](f: Int => Tree[B]) =
+                   fullTree(1).apply(a => fn(a)(f))
+               }.improve) // 1 CodensityTree
+      // Tree built; run improve
+      = zigzag(fullTree(1).apply(a => fn(a)(Leaf(_))))
+      = zigzag(fn(1)(Leaf(_)))
+      = zigzag(new Codensity[Tree, Int] {
+                 def apply[B](f: Int => Tree[B]) =
+                   new Node(<thunk>.apply(f), <thunk>)
+               }.apply(Leaf(_))) // 1 CodensityTree
+  #+END_SRC
+* Call expansion for /CodensityTree/
+  #+BEGIN_SRC scala
+    zigzag(fullTree[CodensityTree](2).improve)
+      = zigzag(fullTree(1).flatMap(fn).improve) // 1 CodensityTree
+      = zigzag(new Codensity[Tree, Int] {
+                 def apply[B](f: Int => Tree[B]) =
+                   fullTree(1).apply(a => fn(a)(f))
+               }.improve) // 1 CodensityTree
+      // Tree built; run improve
+      = zigzag(fullTree(1).apply(a => fn(a)(Leaf(_))))
+      = zigzag(fn(1)(Leaf(_)))
+      = zigzag(new Codensity[Tree, Int] {
+                 def apply[B](f: Int => Tree[B]) =
+                   new Node(<thunk>.apply(f), <thunk>)
+               }.apply(Leaf(_))) // 1 CodensityTree
+      = zigzag(new Node(new Codensity[Tree, Int] {
+                          def apply[B](f: Int => Tree[B]) = f(0)
+                        }.apply(Leaf(_)), <thunk>)) // 1 CodensityTree, 1 Node
   #+END_SRC
 * Call expansion for /CodensityTree/
   #+BEGIN_SRC scala
@@ -303,46 +464,45 @@
     n /CodensityTree/ instances
     (n - 1) /Node/ instances
     1 /Leaf/ instance
-* Under the hood
-** Makes binds right-associative
-   - One consequence of using /Codensity/ is that it makes binds right associative
-   - For example
-     #+BEGIN_SRC scala
-       // ‘Left associative binds’ are easier to write, but here creates and destroys
-       // intermediate data structures unnecessarily:
-       List(1,2).flatMap(fn_a).flatMap(fn_b)
-       
-       // Right associative binds are a little easier on the garbage collector, but a
-       // little less pleasant to write:
-       List(1,2).flatMap(x => fn_a(x).flatMap(fn_b))
-       
-       // This performs the binds in the right associative fashion as with the second
-       // example above without requiring the binds be written right-associatively
-       Codensity.rep(List(1,2)).flatMap(fn_a).flatMap(fn_b).improve
-     #+END_SRC
-   - This is a safe transformation thanks to the monad laws!
-   - So can create problems for ‘monads’ that don't follow them e.g. /ListT/
-     in Haskell.
-** fmap fusion
-   #+BEGIN_SRC scala
-     // Similarly to bind, repeated map calls can also lead to the excessive
-     // creation and destruction of intermediate data structures.
-     //
-     // After each map call here an intermediate list is generated only to shortly
-     // become garbage.
-     List(1,2).map(foo).map(bar).map(baz)
-     
-     // This can be avoided by composing the functions:
-     List(1,2).map(foo.map(bar).map(baz))
-     
-     // Codensity ‘fuses’ the mapped functions together, such that this behaves as
-     // the example above.
-     Codensity.rep(List(1,2)).map(foo).map(bar).map(baz).improve
-   #+END_SRC
-   
-   - Use this to create a /Functor[Codensity[Set, _]]/ and amuse and/or dismay
-     your friends!
-   - This can also achieved via the (simpler) Yoneda lemma
+* Makes binds right-associative
+  - One consequence of using /Codensity/ is that it makes binds right associative
+  - For example
+    #+BEGIN_SRC scala
+      // ‘Left associative binds’ are easier to write, but here creates and destroys
+      // intermediate data structures unnecessarily:
+      List(1,2).flatMap(fn_a).flatMap(fn_b)
+      
+      // Right associative binds are a little easier on the garbage collector, but a
+      // little less pleasant to write:
+      List(1,2).flatMap(x => fn_a(x).flatMap(fn_b))
+      
+      // This performs the binds in the right associative fashion as with the second
+      // example above without requiring the binds be written right-associatively
+      Codensity.rep(List(1,2)).flatMap(fn_a).flatMap(fn_b).improve
+    #+END_SRC
+  - This is a safe transformation thanks to the monad laws!
+  - So can create problems for ‘monads’ that don't follow them e.g. /ListT/
+    in Haskell.
+* fmap fusion
+  #+BEGIN_SRC scala
+    // Similarly to bind, repeated map calls can also lead to the excessive
+    // creation and destruction of intermediate data structures.
+    //
+    // After each map call here an intermediate list is generated only to shortly
+    // become garbage.
+    List(1,2).map(foo).map(bar).map(baz)
+    
+    // This can be avoided by composing the functions:
+    List(1,2).map(foo.map(bar).map(baz))
+    
+    // Codensity ‘fuses’ the mapped functions together, such that this behaves as
+    // the example above.
+    Codensity.rep(List(1,2)).map(foo).map(bar).map(baz).improve
+  #+END_SRC
+  
+  - Use this to create a /Functor[Codensity[Set, _]]/ and amuse and/or dismay
+    your friends!
+  - This can also achieved via the simpler[[[a][citation needed]]] Yoneda lemma
 * Real world examples
   - As hinted at by the title of the paper, this can be especially helpful
     with code that makes heavy use of the free monad
