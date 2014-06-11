@@ -520,3 +520,7 @@
     http://comonad.com/reader/2011/free-monads-for-less/
   - This will theoretically be pushed to Bitbucket at some point.
     https://bitbucket.org/hgiddens/codensity-talk
+  - scalaz-stream
+    https://github.com/scalaz/scalaz-stream
+  - pipes (for Haskell)
+    http://hackage.haskell.org/package/pipes
