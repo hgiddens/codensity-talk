@@ -524,3 +524,14 @@
     https://github.com/scalaz/scalaz-stream
   - pipes (for Haskell)
     http://hackage.haskell.org/package/pipes
+* Colophon
+  This will sort of vaguely work as a presentation via epresent. Unless you
+  never need to go back a slide the following might help.
+
+  #+BEGIN_SRC emacs-lisp
+    (eval-after-load 'epresent
+      '(defadvice epresent-previous-page (around prevent-org-content-running activate)
+         "The call to `org-content' breaks `epresent-previous-page' and doesn't seem necessary."
+         (flet ((org-content ()))
+           ad-do-it)))
+  #+END_SRC
