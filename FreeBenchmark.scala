@@ -115,6 +115,46 @@ object Ch {
         }
     }
 
+  trait YY[F[_], A] {
+    def run[B](point: A => B)(flatten: F[B] => B): B
+    def retract(implicit F: Monad[F]): F[A] =
+      run[F[A]](F.point(_))(F.join(_))
+  }
+
+  object YY {
+    implicit def yyMonad[F[_]] = new Monad[({ type l[a] = YY[F, a] })#l] {
+      def point[A](a: => A) =
+        new YY[F, A] {
+          def run[B](point: A => B)(flatten: F[B] => B): B =
+            point(a)
+        }
+      def bind[A,B](fa: YY[F, A])(f: A => YY[F, B]): YY[F, B] =
+        new YY[F, B] {
+          def run[C](point: B => C)(flatten: F[C] => C): C = {
+            val fn: A => C = (a: A) => f(a).run(point)(flatten)
+            fa.run(fn)(flatten)
+          }
+        }
+    }
+    implicit object yyFreeLike extends FreeLike[YY] {
+      def monad[F[_]: Functor] = yyMonad[F]
+
+      def wrap[F[_], A](fa: F[YY[F, A]])(implicit F: Functor[F]): YY[F, A] =
+        new YY[F, A] {
+          def run[B](point: A => B)(flatten: F[B] => B): B = {
+            val faRan: F[B] = F.map(fa)(yy => yy.run(point)(flatten))
+            flatten(faRan)
+          }
+        }
+
+      def liftFree[F[_], A](fa: F[A])(implicit F: Functor[F]): YY[F, A] =
+        new YY[F, A] {
+          def run[B](point: A => B)(flatten: F[B] => B): B =
+            flatten(F.map(fa)(point))
+        }
+    }
+  }
+
   def retract[F[_], A](yffa: YF[F, A])(implicit F: Monad[F]): F[A] =
     yffa(F.point[A](_))(F.join[A](_))
 }
